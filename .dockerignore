@@ -6,6 +6,8 @@ node_modules
 .next
 dist
 server/bin
+!server/bin/
+!server/bin/multica
 server/tmp
 
 # Git

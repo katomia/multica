@@ -1,0 +1,20 @@
+FROM python:3.12-bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  bash \
+  ca-certificates \
+  curl \
+  git \
+  jq \
+  nodejs \
+  npm \
+  && rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g @openai/codex@0.142.5 \
+  && codex --version
+
+COPY server/bin/multica /usr/local/bin/multica
+COPY deploy/k8s/codex-runtimes/entrypoint.sh /usr/local/bin/multica-runtime-entrypoint
+RUN chmod +x /usr/local/bin/multica-runtime-entrypoint
+
+ENTRYPOINT ["/usr/local/bin/multica-runtime-entrypoint"]

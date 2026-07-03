@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
@@ -316,6 +318,15 @@ func (h *Handler) CreateProjectResource(w http.ResponseWriter, r *http.Request) 
 		}
 		writeError(w, http.StatusInternalServerError, "failed to create project resource")
 		return
+	}
+
+	// If this project already has a project-based room, seed default 'write'
+	// grants for the new resource against every agent in that room. Keeps the
+	// access matrix complete without making the user open room settings.
+	if room, err := h.Queries.GetRoomByProjectID(r.Context(), project.ID); err == nil {
+		h.fillRoomResourceGrants(r.Context(), room.ID, project.ID)
+	} else if !errors.Is(err, pgx.ErrNoRows) {
+		slog.Warn("project resource hook: lookup room by project failed", "project_id", uuidToString(project.ID), "error", err)
 	}
 
 	resp := projectResourceToResponse(resource)

@@ -1,0 +1,2 @@
+DROP INDEX IF EXISTS room_orchestration_unique_source_no_chat;
+ALTER TABLE room_orchestration ADD CONSTRAINT room_orchestration_source_message_id_key UNIQUE (source_message_id);

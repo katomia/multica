@@ -5,6 +5,17 @@ WHERE workspace_id = $1
   AND (sqlc.narg('priority')::text IS NULL OR priority = sqlc.narg('priority'))
 ORDER BY created_at DESC;
 
+-- name: ListProjectsWithoutRoom :many
+-- Projects that have no project-based room yet. Powers the "Create room from
+-- project" picker. NOT EXISTS over workspace_room.project_id naturally skips
+-- NULL project_id rows (plain rooms), so no extra IS NOT NULL guard is needed.
+SELECT * FROM project
+WHERE project.workspace_id = $1
+  AND NOT EXISTS (
+    SELECT 1 FROM workspace_room r WHERE r.project_id = project.id
+  )
+ORDER BY created_at DESC;
+
 -- name: GetProject :one
 SELECT * FROM project
 WHERE id = $1;

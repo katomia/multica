@@ -1,0 +1,103 @@
+# Development overlay for testing Multica in the company Kubernetes cluster.
+# Use with:
+#   helm install multica deploy/helm/multica -n multica-dev -f deploy/helm/multica/multica-dev-values.yaml
+#
+# This file intentionally contains no secrets. Create `multica-secrets`
+# separately in the target namespace before installing the chart.
+
+images:
+  backend:
+    repository: harbor.weizhipin.com/lc-test/multica-backend
+    tag: dev
+    pullPolicy: IfNotPresent
+  frontend:
+    repository: harbor.weizhipin.com/lc-test/multica-web
+    tag: dev
+    pullPolicy: IfNotPresent
+  postgres:
+    # TODO: Verify this image exists in Harbor before installing. The company
+    # cluster may not be able to pull Docker Hub / GHCR images directly.
+    repository: harbor.weizhipin.com/lc-test/pgvector
+    tag: pg17-trixie
+    pullPolicy: IfNotPresent
+
+existingSecret: multica-secrets
+
+postgres:
+  database: multica
+  user: multica
+  persistence:
+    size: 10Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+backend:
+  replicas: 1
+  uploads:
+    persistence:
+      enabled: true
+      size: 5Gi
+      storageClass: ""
+      accessModes:
+        - ReadWriteOnce
+  config:
+    appEnv: development
+    appUrl: http://127.0.0.1:18080
+    frontendOrigin: http://127.0.0.1:18080
+    corsAllowedOrigins: ""
+    cookieDomain: ""
+    resendFromEmail: noreply@multica.ai
+    allowSignup: true
+    allowedEmails: ""
+    allowedEmailDomains: ""
+    disableWorkspaceCreation: false
+    googleClientId: ""
+    googleRedirectUri: http://127.0.0.1:18080/auth/callback
+    s3Bucket: ""
+    s3Region: us-west-2
+    cloudfrontDomain: ""
+    cloudfrontKeyPairId: ""
+    # Use backend port-forward for local upload URLs during cluster testing.
+    localUploadBaseUrl: http://127.0.0.1:18081
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+frontend:
+  replicas: 1
+  compatibility:
+    # Keep this enabled for the stock Dockerfile.web build, which bakes
+    # REMOTE_API_URL=http://backend:8080 into the Next.js standalone image.
+    backendAlias: true
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+ingress:
+  # First test via port-forward; turn this on later after DNS/Ingress hostnames
+  # are chosen for the cluster.
+  enabled: false
+  className: traefik
+  annotations: {}
+  frontend:
+    host: multica.dev.lan
+  backend:
+    host: api.multica.dev.lan
+
+monitoring:
+  prometheusRule:
+    enabled: false

@@ -155,6 +155,27 @@ describe("LoginPage", () => {
     expect(button).toBeDisabled();
   });
 
+  it("syncs browser-autofilled email into state after mount", async () => {
+    renderWithI18n(<LoginPage onSuccess={onSuccess} />);
+
+    const emailInput = screen.getByLabelText(/email/i) as HTMLInputElement;
+    const button = screen.getByRole("button", { name: /continue/i });
+    expect(button).toBeDisabled();
+
+    // Simulate the browser writing into the DOM without a React change event.
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    )?.set;
+    setter?.call(emailInput, "autofill@example.com");
+
+    await act(async () => {
+      vi.advanceTimersByTime(700);
+    });
+
+    expect(button).not.toBeDisabled();
+  });
+
   // -------------------------------------------------------------------------
   // sendCode flow
   // -------------------------------------------------------------------------

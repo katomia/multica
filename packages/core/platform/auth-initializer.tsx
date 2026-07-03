@@ -40,13 +40,7 @@ export function AuthInitializer({
 
   useEffect(() => {
     const api = getApi();
-
-    // Stamp attribution before anything else — the signup event (server-side)
-    // reads this cookie, so it has to be present before the user hits submit.
-    captureSignupSource();
-
-    // Fetch app config (CDN domain, PostHog key, …) in the background — non-blocking.
-    api
+    const configPromise = api
       .getConfig()
       .then((cfg) => {
         if (cfg.cdn_domain) {
@@ -75,10 +69,16 @@ export function AuthInitializer({
             environment: cfg.analytics_environment,
           });
         }
+        return cfg;
       })
       .catch(() => {
         /* config is optional — legacy file card matching degrades gracefully */
+        return null;
       });
+
+    // Stamp attribution before anything else — the signup event (server-side)
+    // reads this cookie, so it has to be present before the user hits submit.
+    captureSignupSource();
 
     const onAuthSuccess = (user: User) => {
       onLogin?.();
@@ -105,8 +105,20 @@ export function AuthInitializer({
           onAuthSuccess(user);
           qc.setQueryData(workspaceKeys.list(), wsList);
         })
-        .catch((err) => {
+        .catch(async (err) => {
           logger.error("cookie auth init failed", err);
+          const cfg = await configPromise;
+          if (cfg?.dev_auto_login_enabled === true) {
+            try {
+              const { user } = await api.devLogin();
+              const wsList = await api.listWorkspaces();
+              onAuthSuccess(user);
+              qc.setQueryData(workspaceKeys.list(), wsList);
+              return;
+            } catch (devErr) {
+              logger.error("dev auto-login failed", devErr);
+            }
+          }
           onAuthFailure();
         });
       return;

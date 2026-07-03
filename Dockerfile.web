@@ -1,5 +1,19 @@
 # --- Dependencies ---
-FROM node:22-alpine AS deps
+FROM --platform=$BUILDPLATFORM node:22-alpine AS deps
+
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
+
+ENV HTTP_PROXY=$HTTP_PROXY \
+    HTTPS_PROXY=$HTTPS_PROXY \
+    NO_PROXY=$NO_PROXY \
+    http_proxy=$http_proxy \
+    https_proxy=$https_proxy \
+    no_proxy=$no_proxy
 
 RUN corepack enable && corepack prepare pnpm@10.28.2 --activate
 
@@ -19,7 +33,21 @@ COPY packages/eslint-config/package.json packages/eslint-config/
 RUN pnpm install --frozen-lockfile
 
 # --- Build ---
-FROM node:22-alpine AS builder
+FROM --platform=$BUILDPLATFORM node:22-alpine AS builder
+
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ARG http_proxy
+ARG https_proxy
+ARG no_proxy
+
+ENV HTTP_PROXY=$HTTP_PROXY \
+    HTTPS_PROXY=$HTTPS_PROXY \
+    NO_PROXY=$NO_PROXY \
+    http_proxy=$http_proxy \
+    https_proxy=$https_proxy \
+    no_proxy=$no_proxy
 
 RUN corepack enable && corepack prepare pnpm@10.28.2 --activate
 
@@ -46,7 +74,7 @@ ENV NEXT_PUBLIC_APP_VERSION=$NEXT_PUBLIC_APP_VERSION
 ENV STANDALONE=true
 
 # Build the web app (standalone output for minimal runtime)
-RUN pnpm --filter @multica/web build
+RUN NODE_OPTIONS=--max-old-space-size=2048 pnpm --filter @multica/web build
 
 # --- Runtime ---
 FROM node:22-alpine AS runner

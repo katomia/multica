@@ -79,7 +79,8 @@ export type WSEventType =
   | "github_installation:deleted"
   | "pull_request:linked"
   | "pull_request:updated"
-  | "pull_request:unlinked";
+  | "pull_request:unlinked"
+  | "room:message_created";
 
 export interface WSMessage<T = unknown> {
   type: WSEventType;
@@ -475,6 +476,7 @@ export interface WSEventPayloadMap {
   "pull_request:linked": unknown;
   "pull_request:updated": unknown;
   "pull_request:unlinked": unknown;
+  "room:message_created": { room_id: string; agent_id?: string; content?: string };
 }
 
 /**

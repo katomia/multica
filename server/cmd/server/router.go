@@ -180,6 +180,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	}
 	h.TaskService.Metrics = opts.BusinessMetrics
 	h.IssueService.Metrics = opts.BusinessMetrics
+	h.TaskService.RoomOrchestratorApply = h.ApplyOrchestratorDecision
 	if opts.BusinessMetrics != nil {
 		// Wire the BusinessMetrics receiver into the cloud runtime client
 		// so every outbound Fleet/Gateway request feeds the
@@ -548,6 +549,7 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	r.With(authRL).Post("/auth/send-code", h.SendCode)
 	r.With(authVerifyRL).Post("/auth/verify-code", h.VerifyCode)
 	r.With(authRL).Post("/auth/google", h.GoogleLogin)
+	r.Post("/auth/dev-login", h.DevLogin)
 	r.Post("/auth/logout", h.Logout)
 
 	// Public API
@@ -781,6 +783,26 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 
 			// Assignee frequency
 			r.Get("/api/assignee-frequency", h.GetAssigneeFrequency)
+
+			// Workspace rooms
+			r.Route("/api/rooms", func(r chi.Router) {
+				r.Get("/", h.ListRooms)
+				r.Post("/", h.CreateRoom)
+				r.Route("/{roomId}", func(r chi.Router) {
+					r.Get("/", h.GetRoom)
+					r.Patch("/", h.UpdateRoom)
+					r.Delete("/", h.DeleteRoom)
+					r.Get("/members", h.ListRoomMembers)
+					r.Post("/members", h.AddRoomMember)
+					r.Delete("/members/{memberType}/{memberId}", h.DeleteRoomMember)
+					r.Get("/messages", h.ListRoomMessages)
+					r.Get("/orchestrations", h.ListRoomOrchestrations)
+					r.Post("/messages", h.CreateRoomMessage)
+					r.Get("/issues", h.ListRoomIssues)
+					r.Get("/resource-grants", h.ListRoomResourceGrants)
+					r.Patch("/resource-grants/{grantId}", h.UpdateRoomResourceGrant)
+				})
+			})
 
 			// Issues
 			r.Route("/api/issues", func(r chi.Router) {

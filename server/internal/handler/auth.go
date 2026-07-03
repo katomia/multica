@@ -38,7 +38,11 @@ func (e SignupError) Error() string {
 var ErrSignupProhibited = SignupError{Message: "user registration is disabled on this self-hosted instance"}
 var ErrEmailNotAllowed = SignupError{Message: "email address or domain not allowed on this instance"}
 
-const devVerificationCodeEnv = "MULTICA_DEV_VERIFICATION_CODE"
+const (
+	devVerificationCodeEnv = "MULTICA_DEV_VERIFICATION_CODE"
+	devAutoLoginEnv        = "MULTICA_DEV_AUTO_LOGIN"
+	devAutoLoginEmailEnv   = "MULTICA_DEV_AUTO_LOGIN_EMAIL"
+)
 
 // supportedLanguages mirrors `SUPPORTED_LOCALES` in packages/core/i18n/types.ts.
 // Keep both lists in sync when adding a locale — the user-controlled `language`
@@ -147,6 +151,122 @@ func isSixDigitCode(code string) bool {
 		}
 	}
 	return true
+}
+
+func isDevAutoLoginEnabled() bool {
+	if isProductionEnv() {
+		return false
+	}
+	v := strings.TrimSpace(strings.ToLower(os.Getenv(devAutoLoginEnv)))
+	return v == "true" || v == "1" || v == "yes" || v == "on"
+}
+
+func devAutoLoginEmail() string {
+	if v := strings.TrimSpace(strings.ToLower(os.Getenv(devAutoLoginEmailEnv))); v != "" {
+		return v
+	}
+	return "dev@multica.local"
+}
+
+func devWorkspaceName(email string) string {
+	local := strings.TrimSpace(email)
+	if at := strings.Index(local, "@"); at > 0 {
+		local = local[:at]
+	}
+	local = strings.TrimSpace(local)
+	if local == "" {
+		return "Dev Workspace"
+	}
+	return strings.Title(local) + "'s Workspace"
+}
+
+func devWorkspaceSlug(email string) string {
+	local := strings.TrimSpace(strings.ToLower(email))
+	if at := strings.Index(local, "@"); at > 0 {
+		local = local[:at]
+	}
+	var b strings.Builder
+	lastHyphen := false
+	for _, ch := range local {
+		isAlphaNum := (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')
+		if isAlphaNum {
+			b.WriteRune(ch)
+			lastHyphen = false
+			continue
+		}
+		if !lastHyphen {
+			b.WriteByte('-')
+			lastHyphen = true
+		}
+	}
+	slug := strings.Trim(b.String(), "-")
+	if slug == "" {
+		slug = "dev"
+	}
+	if !workspaceSlugPattern.MatchString(slug) || isReservedSlug(slug) {
+		slug = "dev-workspace"
+	}
+	return slug
+}
+
+func (h *Handler) ensureDevWorkspace(ctx context.Context, user db.User) error {
+	if user.OnboardedAt.Valid {
+		return nil
+	}
+
+	workspaces, err := h.Queries.ListWorkspaces(ctx, user.ID)
+	if err != nil {
+		return err
+	}
+	if len(workspaces) > 0 {
+		_, err := h.Queries.MarkUserOnboarded(ctx, user.ID)
+		return err
+	}
+
+	tx, err := h.TxStarter.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	qtx := h.Queries.WithTx(tx)
+	baseName := devWorkspaceName(user.Email)
+	baseSlug := devWorkspaceSlug(user.Email)
+	var ws db.Workspace
+	for i := 0; i < 10; i++ {
+		slug := baseSlug
+		if i > 0 {
+			slug = fmt.Sprintf("%s-%d", baseSlug, i+1)
+		}
+		ws, err = qtx.CreateWorkspace(ctx, db.CreateWorkspaceParams{
+			Name:        baseName,
+			Slug:        slug,
+			Description: pgtype.Text{},
+			Context:     pgtype.Text{},
+			IssuePrefix: generateIssuePrefix(baseName),
+		})
+		if err == nil {
+			break
+		}
+		if !isUniqueViolation(err) {
+			return err
+		}
+	}
+	if err != nil {
+		return err
+	}
+
+	if _, err := qtx.CreateMember(ctx, db.CreateMemberParams{
+		WorkspaceID: ws.ID,
+		UserID:      user.ID,
+		Role:        "owner",
+	}); err != nil {
+		return err
+	}
+	if _, err := qtx.MarkUserOnboarded(ctx, user.ID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (h *Handler) issueJWT(user db.User) (string, error) {
@@ -414,6 +534,61 @@ func (h *Handler) VerifyCode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slog.Info("user logged in", append(logger.RequestAttrs(r), "user_id", uuidToString(user.ID), "email", user.Email)...)
+	writeJSON(w, http.StatusOK, LoginResponse{
+		Token: tokenString,
+		User:  userToResponse(user),
+	})
+}
+
+// DevLogin bypasses the email-code step for local development only. It is
+// intentionally gated behind both a non-production APP_ENV and an explicit env
+// switch so a self-hosted test/staging server does not silently become
+// passwordless just because it is not marked production.
+func (h *Handler) DevLogin(w http.ResponseWriter, r *http.Request) {
+	if !isDevAutoLoginEnabled() {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+
+	email := devAutoLoginEmail()
+	user, isNew, err := h.findOrCreateUser(r.Context(), email)
+	if err != nil {
+		var signupErr SignupError
+		if errors.As(err, &signupErr) {
+			writeError(w, http.StatusForbidden, signupErr.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to create dev user")
+		return
+	}
+	if isNew {
+		obsmetrics.RecordEvent(h.Analytics, h.Metrics, analytics.Signup(uuidToString(user.ID), user.Email, signupSourceFromRequest(r)))
+	}
+	if err := h.ensureDevWorkspace(r.Context(), user); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to bootstrap dev workspace")
+		return
+	}
+	user, err = h.Queries.GetUser(r.Context(), user.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load dev user")
+		return
+	}
+
+	tokenString, err := h.issueJWT(user)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to generate token")
+		return
+	}
+	if err := auth.SetAuthCookies(w, tokenString); err != nil {
+		slog.Warn("failed to set auth cookies", "error", err)
+	}
+	if h.CFSigner != nil {
+		for _, cookie := range h.CFSigner.SignedCookies(time.Now().Add(auth.AuthTokenTTL())) {
+			http.SetCookie(w, cookie)
+		}
+	}
+
+	slog.Info("dev auto-login", append(logger.RequestAttrs(r), "user_id", uuidToString(user.ID), "email", user.Email)...)
 	writeJSON(w, http.StatusOK, LoginResponse{
 		Token: tokenString,
 		User:  userToResponse(user),

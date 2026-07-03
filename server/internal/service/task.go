@@ -25,6 +25,17 @@ import (
 	"github.com/multica-ai/multica/server/pkg/taskfailure"
 )
 
+// RoomOrchestratorApplyFn is called when a room orchestrator chat task
+// completes and its reply contains a structured <orchestrator-decision> block.
+// It receives the orchestration record, the orchestrator agent ID, and the
+// parsed decision JSON string. Wired from router.go to avoid circular deps
+// between TaskService and IssueService.
+type RoomOrchestratorApplyFn func(ctx context.Context, orch db.RoomOrchestration, agentID pgtype.UUID, decisionJSON string)
+
+// RoomActionChatCompleteFn is called when a room plan chat action replies.
+// The handler owns action state and dependent issue wakeups.
+type RoomActionChatCompleteFn func(ctx context.Context, action db.RoomOrchestrationAction, agentID pgtype.UUID, output string)
+
 type TaskService struct {
 	Queries   *db.Queries
 	TxStarter TxStarter
@@ -39,6 +50,11 @@ type TaskService struct {
 	// goes through the DB. Wired in router.go from the shared Redis
 	// client.
 	EmptyClaim *EmptyClaimCache
+	// RoomOrchestratorApply is called when an orchestrator chat reply arrives
+	// containing a structured decision. Nil disables orchestrator post-processing.
+	RoomOrchestratorApply RoomOrchestratorApplyFn
+	// RoomActionChatComplete is called when a fan-out room chat action replies.
+	RoomActionChatComplete RoomActionChatCompleteFn
 
 	analyticsContextMu    sync.Mutex
 	analyticsContextCache map[string]analytics.TaskContext
@@ -1412,6 +1428,12 @@ func (s *TaskService) CompleteTask(ctx context.Context, taskID pgtype.UUID, resu
 			}
 		}
 		s.broadcastChatDone(ctx, task, assistantMsg)
+
+		// If this chat session is linked to a room orchestration, write the
+		// agent reply back into the room so it appears in the room feed.
+		if assistantMsg != nil {
+			s.maybeWriteAgentReplyToRoom(ctx, task.ChatSessionID, task.AgentID, assistantMsg.Content)
+		}
 	}
 
 	// Reconcile agent status
@@ -1550,6 +1572,15 @@ func (s *TaskService) FailTask(ctx context.Context, taskID pgtype.UUID, errMsg, 
 			slog.Warn("failed to set unread_since on failure",
 				"chat_session_id", util.UUIDToString(task.ChatSessionID),
 				"error", err)
+		}
+	}
+
+	if task.ChatSessionID.Valid {
+		if orch, err := s.Queries.GetRoomOrchestrationByChatSession(ctx, task.ChatSessionID); err == nil {
+			_, _ = s.Queries.UpdateRoomOrchestrationFailed(ctx, db.UpdateRoomOrchestrationFailedParams{
+				ID:    orch.ID,
+				Error: pgtype.Text{String: redact.Text(errMsg), Valid: errMsg != ""},
+			})
 		}
 	}
 
@@ -2267,6 +2298,93 @@ func (s *TaskService) broadcastChatDone(ctx context.Context, task db.AgentTaskQu
 		ChatSessionID: util.UUIDToString(task.ChatSessionID),
 		Payload:       payload,
 	})
+}
+
+// maybeWriteAgentReplyToRoom checks whether the chat session is linked to a
+// room orchestration and, if so, writes the agent reply as a room_message so
+// it appears in the room feed alongside the original user message.
+//
+// For orchestrator_routing orchestrations, it additionally parses the
+// <orchestrator-decision> block from the reply and fires RoomOrchestratorApply
+// in a goroutine so the server can create issues from the structured decision.
+func (s *TaskService) maybeWriteAgentReplyToRoom(ctx context.Context, chatSessionID pgtype.UUID, agentID pgtype.UUID, content string) {
+	orch, err := s.Queries.GetRoomOrchestrationByChatSession(ctx, chatSessionID)
+	if err != nil {
+		action, actionErr := s.Queries.GetRoomOrchestrationActionByChatSession(ctx, chatSessionID)
+		if actionErr != nil {
+			return
+		}
+		orch, err = s.Queries.GetRoomOrchestration(ctx, action.OrchestrationID)
+		if err != nil {
+			return
+		}
+		if s.RoomActionChatComplete != nil {
+			actionCopy := action
+			go s.RoomActionChatComplete(context.Background(), actionCopy, agentID, content)
+		}
+	}
+	room, err := s.Queries.GetWorkspaceRoomByID(ctx, orch.RoomID)
+	if err != nil {
+		return
+	}
+
+	visibleContent := content
+	if orch.DecisionType == "orchestrator_routing" {
+		var decisionJSON string
+		visibleContent, decisionJSON = parseOrchestratorDecision(content)
+		if decisionJSON != "" && s.RoomOrchestratorApply != nil {
+			orchCopy := orch
+			go s.RoomOrchestratorApply(context.Background(), orchCopy, agentID, decisionJSON)
+		}
+	}
+
+	if visibleContent == "" {
+		return
+	}
+	if _, err := s.Queries.CreateRoomMessage(ctx, db.CreateRoomMessageParams{
+		RoomID:      orch.RoomID,
+		SenderType:  "agent",
+		SenderID:    agentID,
+		MessageType: "agent",
+		Content:     visibleContent,
+		Metadata:    []byte(`{}`),
+	}); err != nil {
+		slog.Warn("failed to write agent reply to room", "room_id", util.UUIDToString(orch.RoomID), "error", err)
+		return
+	}
+	s.Bus.Publish(events.Event{
+		Type:        "room:message_created",
+		WorkspaceID: util.UUIDToString(room.WorkspaceID),
+		ActorType:   "agent",
+		ActorID:     util.UUIDToString(agentID),
+		Payload: map[string]any{
+			"room_id":  util.UUIDToString(orch.RoomID),
+			"agent_id": util.UUIDToString(agentID),
+			"content":  visibleContent,
+		},
+	})
+}
+
+// parseOrchestratorDecision splits an orchestrator reply into the human-readable
+// part and the JSON inside <orchestrator-decision>...</orchestrator-decision>.
+// Returns visibleContent with the tag block stripped, and the raw JSON string.
+func parseOrchestratorDecision(content string) (visibleContent, decisionJSON string) {
+	const openTag = "<orchestrator-decision>"
+	const closeTag = "</orchestrator-decision>"
+	start := strings.Index(content, openTag)
+	end := strings.Index(content, closeTag)
+	if start == -1 || end == -1 || end <= start {
+		return strings.TrimSpace(content), ""
+	}
+	decisionJSON = strings.TrimSpace(content[start+len(openTag) : end])
+	before := strings.TrimSpace(content[:start])
+	after := strings.TrimSpace(content[end+len(closeTag):])
+	if before != "" && after != "" {
+		visibleContent = before + "\n" + after
+	} else {
+		visibleContent = before + after
+	}
+	return visibleContent, decisionJSON
 }
 
 // broadcastIssueUpdated publishes the issue:updated event the frontend's

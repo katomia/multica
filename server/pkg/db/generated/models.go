@@ -672,6 +672,79 @@ type ProjectResource struct {
 	CreatedBy    pgtype.UUID        `json:"created_by"`
 }
 
+type RoomIssueLink struct {
+	RoomID          pgtype.UUID        `json:"room_id"`
+	RoomMessageID   pgtype.UUID        `json:"room_message_id"`
+	OrchestrationID pgtype.UUID        `json:"orchestration_id"`
+	IssueID         pgtype.UUID        `json:"issue_id"`
+	LinkRole        string             `json:"link_role"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+}
+
+type RoomMember struct {
+	RoomID     pgtype.UUID        `json:"room_id"`
+	MemberType string             `json:"member_type"`
+	MemberID   pgtype.UUID        `json:"member_id"`
+	JoinedByID pgtype.UUID        `json:"joined_by_id"`
+	JoinedAt   pgtype.Timestamptz `json:"joined_at"`
+}
+
+type RoomMessage struct {
+	ID          pgtype.UUID        `json:"id"`
+	RoomID      pgtype.UUID        `json:"room_id"`
+	SenderType  string             `json:"sender_type"`
+	SenderID    pgtype.UUID        `json:"sender_id"`
+	MessageType string             `json:"message_type"`
+	Content     string             `json:"content"`
+	Metadata    []byte             `json:"metadata"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
+type RoomOrchestration struct {
+	ID              pgtype.UUID        `json:"id"`
+	RoomID          pgtype.UUID        `json:"room_id"`
+	SourceMessageID pgtype.UUID        `json:"source_message_id"`
+	DecisionSource  string             `json:"decision_source"`
+	DecisionType    string             `json:"decision_type"`
+	Status          string             `json:"status"`
+	InputSnapshot   []byte             `json:"input_snapshot"`
+	DecisionJson    []byte             `json:"decision_json"`
+	ModelProvider   pgtype.Text        `json:"model_provider"`
+	ModelName       pgtype.Text        `json:"model_name"`
+	Error           pgtype.Text        `json:"error"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	AppliedAt       pgtype.Timestamptz `json:"applied_at"`
+	ChatSessionID   pgtype.UUID        `json:"chat_session_id"`
+}
+
+type RoomOrchestrationAction struct {
+	ID              pgtype.UUID        `json:"id"`
+	OrchestrationID pgtype.UUID        `json:"orchestration_id"`
+	ActionKey       string             `json:"action_key"`
+	Mode            string             `json:"mode"`
+	AgentID         pgtype.UUID        `json:"agent_id"`
+	Title           string             `json:"title"`
+	Stage           int32              `json:"stage"`
+	Status          string             `json:"status"`
+	Deliverable     string             `json:"deliverable"`
+	DependsOn       []byte             `json:"depends_on"`
+	ChatSessionID   pgtype.UUID        `json:"chat_session_id"`
+	IssueID         pgtype.UUID        `json:"issue_id"`
+	Output          string             `json:"output"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+}
+
+type RoomResourceGrant struct {
+	ID          pgtype.UUID        `json:"id"`
+	RoomID      pgtype.UUID        `json:"room_id"`
+	ResourceID  pgtype.UUID        `json:"resource_id"`
+	AgentID     pgtype.UUID        `json:"agent_id"`
+	AccessLevel string             `json:"access_level"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+}
+
 type RuntimeProfile struct {
 	ID             pgtype.UUID        `json:"id"`
 	WorkspaceID    pgtype.UUID        `json:"workspace_id"`
@@ -909,4 +982,18 @@ type WorkspaceInvitation struct {
 	CreatedAt     pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
 	ExpiresAt     pgtype.Timestamptz `json:"expires_at"`
+}
+
+type WorkspaceRoom struct {
+	ID                  pgtype.UUID        `json:"id"`
+	WorkspaceID         pgtype.UUID        `json:"workspace_id"`
+	Name                string             `json:"name"`
+	DisplayName         string             `json:"display_name"`
+	Description         string             `json:"description"`
+	Visibility          string             `json:"visibility"`
+	CreatedByID         pgtype.UUID        `json:"created_by_id"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt           pgtype.Timestamptz `json:"updated_at"`
+	OrchestratorAgentID pgtype.UUID        `json:"orchestrator_agent_id"`
+	ProjectID           pgtype.UUID        `json:"project_id"`
 }

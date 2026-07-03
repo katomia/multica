@@ -78,6 +78,7 @@ import type {
   UpdateProjectRequest,
   ListProjectsResponse,
   ProjectResource,
+  RoomOrchestration,
   CreateProjectResourceRequest,
   UpdateProjectResourceRequest,
   ListProjectResourcesResponse,
@@ -124,6 +125,16 @@ import type {
   CreateBillingCheckoutSessionResponse,
   BillingCheckoutSessionStatus,
   CreateBillingPortalSessionResponse,
+  Room,
+  RoomMember,
+  RoomMessage,
+  RoomIssueEntry,
+  CreateRoomRequest,
+  AddRoomMemberRequest,
+  SendRoomMessageRequest,
+  SendRoomMessageResponse,
+  RoomResourceGrant,
+  UpdateRoomResourceGrantRequest,
 } from "../types";
 import type { OnboardingCompletionPath } from "../onboarding/types";
 import type {
@@ -208,6 +219,23 @@ import {
   EMPTY_CANCEL_TASK_RESPONSE,
   InboxUnreadSummarySchema,
   EMPTY_INBOX_UNREAD_SUMMARY,
+  EMPTY_ROOM_ISSUE_ENTRY_LIST,
+  EMPTY_ROOM_LIST,
+  EMPTY_ROOM_MEMBER_LIST,
+  EMPTY_ROOM_MESSAGE_LIST,
+  EMPTY_ROOM_ORCHESTRATION_LIST,
+  EMPTY_SEND_ROOM_MESSAGE_RESPONSE,
+  RoomIssueEntryListSchema,
+  RoomListSchema,
+  RoomMemberSchema,
+  RoomMemberListSchema,
+  RoomMessageListSchema,
+  RoomOrchestrationListSchema,
+  RoomResourceGrantListSchema,
+  RoomResourceGrantSchema,
+  EMPTY_ROOM_RESOURCE_GRANT_LIST,
+  RoomSchema,
+  SendRoomMessageResponseSchema,
 } from "./schemas";
 
 /** Identifies the calling client to the server.
@@ -418,6 +446,12 @@ export class ApiClient {
     return this.fetch("/auth/google", {
       method: "POST",
       body: JSON.stringify({ code, redirect_uri: redirectUri }),
+    });
+  }
+
+  async devLogin(): Promise<LoginResponse> {
+    return this.fetch("/auth/dev-login", {
+      method: "POST",
     });
   }
 
@@ -818,6 +852,116 @@ export class ApiClient {
       method: "POST",
       body: JSON.stringify(body),
     });
+  }
+
+  // Rooms
+  async listRooms(): Promise<Room[]> {
+    const raw = await this.fetch<unknown>("/api/rooms");
+    return parseWithFallback(raw, RoomListSchema, EMPTY_ROOM_LIST, {
+      endpoint: "GET /api/rooms",
+    });
+  }
+
+  async createRoom(data: CreateRoomRequest): Promise<Room> {
+    const raw = await this.fetch<unknown>("/api/rooms", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+    return parseWithFallback(raw, RoomSchema, {
+      id: "",
+      workspace_id: "",
+      name: data.name,
+      display_name: data.display_name ?? data.name,
+      description: data.description ?? "",
+      visibility: "workspace",
+      created_by_id: "",
+      project_id: data.project_id ?? null,
+      created_at: "",
+      updated_at: "",
+    }, { endpoint: "POST /api/rooms" });
+  }
+
+  async listRoomMembers(roomId: string): Promise<RoomMember[]> {
+    const raw = await this.fetch<unknown>(`/api/rooms/${roomId}/members`);
+    return parseWithFallback(raw, RoomMemberListSchema, EMPTY_ROOM_MEMBER_LIST, {
+      endpoint: "GET /api/rooms/:id/members",
+    });
+  }
+
+  async addRoomMember(roomId: string, data: AddRoomMemberRequest): Promise<RoomMember> {
+    const raw = await this.fetch<unknown>(`/api/rooms/${roomId}/members`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+    return parseWithFallback(raw, RoomMemberSchema, {
+      room_id: roomId,
+      member_type: data.member_type,
+      member_id: data.member_id,
+      name: "",
+      joined_by_id: null,
+      joined_at: "",
+    }, { endpoint: "POST /api/rooms/:id/members" });
+  }
+
+  async listRoomMessages(roomId: string): Promise<RoomMessage[]> {
+    const raw = await this.fetch<unknown>(`/api/rooms/${roomId}/messages`);
+    return parseWithFallback(raw, RoomMessageListSchema, EMPTY_ROOM_MESSAGE_LIST, {
+      endpoint: "GET /api/rooms/:id/messages",
+    });
+  }
+
+  async listRoomOrchestrations(roomId: string): Promise<RoomOrchestration[]> {
+    const raw = await this.fetch<unknown>(`/api/rooms/${roomId}/orchestrations`);
+    return parseWithFallback(raw, RoomOrchestrationListSchema, EMPTY_ROOM_ORCHESTRATION_LIST, {
+      endpoint: "GET /api/rooms/:id/orchestrations",
+    });
+  }
+
+  async sendRoomMessage(roomId: string, data: SendRoomMessageRequest): Promise<SendRoomMessageResponse> {
+    const raw = await this.fetch<unknown>(`/api/rooms/${roomId}/messages`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+    return parseWithFallback(raw, SendRoomMessageResponseSchema, EMPTY_SEND_ROOM_MESSAGE_RESPONSE, {
+      endpoint: "POST /api/rooms/:id/messages",
+    });
+  }
+
+  async listRoomIssues(roomId: string): Promise<RoomIssueEntry[]> {
+    const raw = await this.fetch<unknown>(`/api/rooms/${roomId}/issues`);
+    return parseWithFallback(raw, RoomIssueEntryListSchema, EMPTY_ROOM_ISSUE_ENTRY_LIST, {
+      endpoint: "GET /api/rooms/:id/issues",
+    });
+  }
+
+  async listRoomResourceGrants(roomId: string): Promise<RoomResourceGrant[]> {
+    const raw = await this.fetch<unknown>(`/api/rooms/${roomId}/resource-grants`);
+    return parseWithFallback(raw, RoomResourceGrantListSchema, EMPTY_ROOM_RESOURCE_GRANT_LIST, {
+      endpoint: "GET /api/rooms/:id/resource-grants",
+    });
+  }
+
+  async updateRoomResourceGrant(
+    roomId: string,
+    grantId: string,
+    data: UpdateRoomResourceGrantRequest,
+  ): Promise<RoomResourceGrant> {
+    const raw = await this.fetch<unknown>(`/api/rooms/${roomId}/resource-grants/${grantId}`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    });
+    return parseWithFallback(raw, RoomResourceGrantSchema, {
+      id: grantId,
+      room_id: roomId,
+      resource_id: "",
+      agent_id: "",
+      agent_name: "",
+      resource_type: "",
+      resource_label: "",
+      access_level: data.access_level,
+      created_at: "",
+      updated_at: "",
+    }, { endpoint: "PATCH /api/rooms/:id/resource-grants/:grantId" });
   }
 
   // Agents
@@ -1880,9 +2024,10 @@ export class ApiClient {
   }
 
   // Projects
-  async listProjects(params?: { status?: string }): Promise<ListProjectsResponse> {
+  async listProjects(params?: { status?: string; without_room?: boolean }): Promise<ListProjectsResponse> {
     const search = new URLSearchParams();
     if (params?.status) search.set("status", params.status);
+    if (params?.without_room) search.set("without_room", "true");
     return this.fetch(`/api/projects?${search}`);
   }
 

@@ -18,6 +18,14 @@ import type {
   InboxWorkspaceUnread,
   ListIssuesResponse,
   ListWebhookDeliveriesResponse,
+  Room,
+  RoomIssueEntry,
+  RoomIssueLink,
+  RoomMember,
+  RoomMessage,
+  RoomOrchestration,
+  RoomResourceGrant,
+  SendRoomMessageResponse,
   SearchIssuesResponse,
   SearchProjectsResponse,
   Squad,
@@ -41,6 +49,7 @@ export interface AppConfigResponse {
   analytics_environment?: string;
   daemon_server_url?: string;
   daemon_app_url?: string;
+  dev_auto_login_enabled?: boolean;
   workspace_creation_disabled?: boolean;
 }
 
@@ -181,6 +190,7 @@ export const AppConfigSchema = z.object({
   analytics_environment: OptionalStringSchema,
   daemon_server_url: OptionalStringSchema,
   daemon_app_url: OptionalStringSchema,
+  dev_auto_login_enabled: BooleanWithDefaultSchema(false).optional(),
   workspace_creation_disabled: BooleanWithDefaultSchema(false).optional(),
 }).loose();
 
@@ -191,6 +201,7 @@ export const EMPTY_APP_CONFIG: AppConfigResponse = {
   google_client_id: "",
   daemon_server_url: "",
   daemon_app_url: "",
+  dev_auto_login_enabled: false,
   workspace_creation_disabled: false,
 };
 
@@ -277,6 +288,127 @@ export const EMPTY_LIST_ISSUES_RESPONSE: ListIssuesResponse = {
   issues: [],
   total: 0,
 };
+
+export const RoomSchema = z.object({
+  id: z.string(),
+  workspace_id: z.string(),
+  name: z.string(),
+  display_name: z.string(),
+  description: z.string().default(""),
+  visibility: z.string(),
+  created_by_id: z.string(),
+  // project_id is null for plain rooms, a UUID for project-based rooms. Optional
+  // so installed clients tolerate older backends that don't return the field.
+  project_id: z.string().nullable().optional(),
+  created_at: z.string(),
+  updated_at: z.string(),
+}).loose();
+
+export const RoomListSchema = z.array(RoomSchema);
+export const EMPTY_ROOM_LIST: Room[] = [];
+
+export const RoomMemberSchema = z.object({
+  room_id: z.string(),
+  member_type: z.string(),
+  member_id: z.string(),
+  name: z.string().default(""),
+  avatar_url: z.string().nullable().optional(),
+  joined_by_id: z.string().nullable(),
+  joined_at: z.string(),
+}).loose();
+
+export const RoomMemberListSchema = z.array(RoomMemberSchema);
+export const EMPTY_ROOM_MEMBER_LIST: RoomMember[] = [];
+
+export const RoomMessageSchema = z.object({
+  id: z.string(),
+  room_id: z.string(),
+  sender_type: z.string(),
+  sender_id: z.string().nullable(),
+  message_type: z.string(),
+  content: z.string(),
+  metadata: z.record(z.string(), z.unknown()).default({}),
+  created_at: z.string(),
+}).loose();
+
+export const RoomMessageListSchema = z.array(RoomMessageSchema);
+export const EMPTY_ROOM_MESSAGE_LIST: RoomMessage[] = [];
+
+export const RoomOrchestrationSchema = z.object({
+  id: z.string(),
+  room_id: z.string(),
+  source_message_id: z.string(),
+  decision_source: z.string().default(""),
+  decision_type: z.string().default(""),
+  status: z.string().default("pending"),
+  decision_json: z.record(z.string(), z.unknown()).default({}),
+  error: z.string().nullable().default(null),
+  created_at: z.string().default(""),
+  applied_at: z.string().nullable().default(null),
+  display_status: z.string().default(""),
+  display_tone: z.string().default("pending"),
+}).loose();
+
+export const RoomOrchestrationListSchema = z.array(RoomOrchestrationSchema);
+export const EMPTY_ROOM_ORCHESTRATION_LIST: RoomOrchestration[] = [];
+
+export const RoomIssueLinkSchema = z.object({
+  room_id: z.string(),
+  room_message_id: z.string(),
+  orchestration_id: z.string().nullable(),
+  issue_id: z.string(),
+  link_role: z.string(),
+  created_at: z.string(),
+}).loose();
+
+export const RoomIssueLinkListSchema = z.array(RoomIssueLinkSchema);
+export const EMPTY_ROOM_ISSUE_LINK_LIST: RoomIssueLink[] = [];
+
+export const RoomIssueEntrySchema = z.object({
+  link: RoomIssueLinkSchema,
+  issue: IssueSchema.optional(),
+}).loose();
+export const RoomIssueEntryListSchema = z.array(RoomIssueEntrySchema);
+export const EMPTY_ROOM_ISSUE_ENTRY_LIST: RoomIssueEntry[] = [];
+
+export const SendRoomMessageResponseSchema = z.object({
+  message: RoomMessageSchema,
+  orchestration: RoomOrchestrationSchema.optional(),
+  issues: z.array(IssueSchema).default([]),
+  links: z.array(RoomIssueLinkSchema).default([]),
+  system_message: RoomMessageSchema.optional(),
+}).loose();
+
+export const EMPTY_SEND_ROOM_MESSAGE_RESPONSE: SendRoomMessageResponse = {
+  message: {
+    id: "",
+    room_id: "",
+    sender_type: "member",
+    sender_id: null,
+    message_type: "human",
+    content: "",
+    metadata: {},
+    created_at: "",
+  },
+  issues: [],
+  links: [],
+};
+
+export const RoomResourceGrantSchema = z.object({
+  id: z.string(),
+  room_id: z.string(),
+  resource_id: z.string(),
+  agent_id: z.string(),
+  agent_name: z.string().default(""),
+  resource_type: z.string().default(""),
+  resource_label: z.string().default(""),
+  access_level: z.string().default("write"),
+  created_at: z.string().default(""),
+  updated_at: z.string().default(""),
+}).loose();
+
+export const RoomResourceGrantListSchema = z.array(RoomResourceGrantSchema);
+export const EMPTY_ROOM_RESOURCE_GRANT_LIST: RoomResourceGrant[] = [];
 
 const SearchIssueResultSchema = IssueSchema.extend({
   match_source: z.string(),

@@ -115,11 +115,23 @@ func (h *Handler) ListProjects(w http.ResponseWriter, r *http.Request) {
 	if p := r.URL.Query().Get("priority"); p != "" {
 		priorityFilter = pgtype.Text{String: p, Valid: true}
 	}
-	projects, err := h.Queries.ListProjects(r.Context(), db.ListProjectsParams{
-		WorkspaceID: wsUUID,
-		Status:      statusFilter,
-		Priority:    priorityFilter,
-	})
+	// without_room=true filters to projects that have no project-based room yet,
+	// powering the "Create room from project" picker. It is mutually exclusive
+	// with status/priority in practice (the picker shows all eligible projects)
+	// but we don't enforce that — the filter just adds a NOT EXISTS clause.
+	withoutRoom := r.URL.Query().Get("without_room") == "true"
+
+	var projects []db.Project
+	var err error
+	if withoutRoom {
+		projects, err = h.Queries.ListProjectsWithoutRoom(r.Context(), wsUUID)
+	} else {
+		projects, err = h.Queries.ListProjects(r.Context(), db.ListProjectsParams{
+			WorkspaceID: wsUUID,
+			Status:      statusFilter,
+			Priority:    priorityFilter,
+		})
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list projects")
 		return

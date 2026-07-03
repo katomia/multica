@@ -220,6 +220,50 @@ func (q *Queries) ListProjects(ctx context.Context, arg ListProjectsParams) ([]P
 	return items, nil
 }
 
+const listProjectsWithoutRoom = `-- name: ListProjectsWithoutRoom :many
+SELECT id, workspace_id, title, description, icon, status, lead_type, lead_id, created_at, updated_at, priority FROM project
+WHERE project.workspace_id = $1
+  AND NOT EXISTS (
+    SELECT 1 FROM workspace_room r WHERE r.project_id = project.id
+  )
+ORDER BY created_at DESC
+`
+
+// Projects that have no project-based room yet. Powers the "Create room from
+// project" picker. NOT EXISTS over workspace_room.project_id naturally skips
+// NULL project_id rows (plain rooms), so no extra IS NOT NULL guard is needed.
+func (q *Queries) ListProjectsWithoutRoom(ctx context.Context, workspaceID pgtype.UUID) ([]Project, error) {
+	rows, err := q.db.Query(ctx, listProjectsWithoutRoom, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Project{}
+	for rows.Next() {
+		var i Project
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.Title,
+			&i.Description,
+			&i.Icon,
+			&i.Status,
+			&i.LeadType,
+			&i.LeadID,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.Priority,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const updateProject = `-- name: UpdateProject :one
 UPDATE project SET
     title = COALESCE($2, title),

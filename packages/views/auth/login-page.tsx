@@ -115,9 +115,17 @@ export function LoginPage({
   const [loading, setLoading] = useState(false);
   const [cooldown, setCooldown] = useState(0);
   const [existingUser, setExistingUser] = useState<User | null>(null);
+  const emailInputRef = useRef<HTMLInputElement | null>(null);
   // Tracks how the existing session was detected so handleCliAuthorize
   // uses the matching token source (cookie → issueCliToken, localStorage → direct).
   const authSourceRef = useRef<"cookie" | "localStorage">("cookie");
+
+  const syncEmailFromDom = useCallback(() => {
+    const domValue = emailInputRef.current?.value ?? "";
+    if (domValue !== email) {
+      setEmail(domValue);
+    }
+  }, [email]);
 
   // Check for existing session when CLI callback is present.
   // Prioritises cookie auth (= current browser session) to avoid authorising
@@ -161,6 +169,18 @@ export function LoginPage({
     const timer = setTimeout(() => setCooldown((c) => c - 1), 1000);
     return () => clearTimeout(timer);
   }, [cooldown]);
+
+  // Browser autofill can populate the input without firing React's onChange,
+  // leaving the controlled state empty and the CTA disabled. Probe the DOM a
+  // few times right after mount/hydration so the button state catches up.
+  useEffect(() => {
+    const timers = [
+      window.setTimeout(syncEmailFromDom, 0),
+      window.setTimeout(syncEmailFromDom, 150),
+      window.setTimeout(syncEmailFromDom, 600),
+    ];
+    return () => timers.forEach((id) => window.clearTimeout(id));
+  }, [syncEmailFromDom]);
 
   const handleSendCode = useCallback(
     async (e?: React.FormEvent) => {
@@ -424,11 +444,16 @@ export function LoginPage({
               <Label htmlFor="login-email">{t(($) => $.common.email)}</Label>
               <Input
                 id="login-email"
+                ref={emailInputRef}
                 type="email"
                 placeholder={t(($) => $.common.email_placeholder)}
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
+                onInput={syncEmailFromDom}
+                onFocus={syncEmailFromDom}
                 autoFocus
+                autoComplete="email"
+                name="email"
                 required
               />
             </div>

@@ -85,6 +85,25 @@ export type {
   CancelledChatMessage,
   CancelTaskResponse,
 } from "./chat";
+export type {
+  Room,
+  RoomVisibility,
+  RoomMember,
+  RoomMemberType,
+  RoomMessage,
+  RoomMessageType,
+  RoomSenderType,
+  RoomOrchestration,
+  RoomIssueLink,
+  RoomIssueEntry,
+  CreateRoomRequest,
+  AddRoomMemberRequest,
+  SendRoomMessageRequest,
+  SendRoomMessageResponse,
+  RoomResourceGrant,
+  RoomResourceAccessLevel,
+  UpdateRoomResourceGrantRequest,
+} from "./room";
 export type { StorageAdapter } from "./storage";
 export type {
   Project,
