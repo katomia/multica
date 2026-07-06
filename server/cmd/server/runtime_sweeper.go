@@ -60,6 +60,13 @@ const (
 	// ticks and 500 rows/tick we drain 60k rows/hour worst case — plenty
 	// of headroom for the documented backlog without monopolising DB CPU.
 	queuedExpireBatchSize = 500
+	// orchestratorRoutingDispatchTimeoutSeconds requeues room orchestrator
+	// routing tasks that were handed to a daemon but never started. The room
+	// orchestrator is a quick routing decision, so after 120s the most useful
+	// recovery is to release its single concurrency slot and retry on the
+	// orchestrator agent's current runtime.
+	orchestratorRoutingDispatchTimeoutSeconds = 120.0
+	orchestratorRoutingRequeueBatchSize       = 100
 )
 
 // runRuntimeSweeper periodically marks runtimes as offline if their
@@ -82,6 +89,7 @@ func runRuntimeSweeper(ctx context.Context, queries *db.Queries, liveness handle
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			requeueStaleOrchestratorRoutingTasks(ctx, queries, taskSvc)
 			sweepStaleRuntimes(ctx, queries, liveness, taskSvc, bus)
 			sweepStaleTasks(ctx, queries, taskSvc, bus)
 			sweepExpiredQueuedTasks(ctx, queries, taskSvc)
@@ -259,6 +267,35 @@ func sweepStaleTasks(ctx context.Context, queries *db.Queries, taskSvc *service.
 	slog.Info("task sweeper: failed stale tasks", "count", len(failedTasks))
 	taskSvc.CaptureLeaseExpiredTasks(ctx, failedTasks)
 	taskSvc.HandleFailedTasks(ctx, failedTasks)
+}
+
+// requeueStaleOrchestratorRoutingTasks retries room orchestrator routing
+// decisions that were dispatched but never acknowledged with StartTask.
+// Unlike the generic stale-task sweeper, this releases the agent slot and
+// requeues on the orchestrator agent's current online runtime because routing
+// is short-lived decision work and stale dispatches otherwise block the room
+// orchestrator's max_concurrent_tasks=1 lane.
+func requeueStaleOrchestratorRoutingTasks(ctx context.Context, queries *db.Queries, taskSvc *service.TaskService) {
+	tasks, err := queries.RequeueStaleOrchestratorRoutingTasks(ctx, db.RequeueStaleOrchestratorRoutingTasksParams{
+		TimeoutSecs: orchestratorRoutingDispatchTimeoutSeconds,
+		MaxPerTick:  orchestratorRoutingRequeueBatchSize,
+	})
+	if err != nil {
+		slog.Warn("task sweeper: failed to requeue stale orchestrator routing tasks", "error", err)
+		return
+	}
+	if len(tasks) == 0 {
+		return
+	}
+
+	slog.Info("task sweeper: requeued stale orchestrator routing tasks", "count", len(tasks))
+	if taskSvc == nil {
+		return
+	}
+	for _, task := range tasks {
+		taskSvc.ReconcileAgentStatus(ctx, task.AgentID)
+		taskSvc.NotifyTaskEnqueued(ctx, task)
+	}
 }
 
 // sweepExpiredQueuedTasks fails tasks that have been sitting in 'queued' for

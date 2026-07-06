@@ -2720,6 +2720,98 @@ func (q *Queries) RefreshAgentStatusFromTasks(ctx context.Context, id pgtype.UUI
 	return i, err
 }
 
+const requeueStaleOrchestratorRoutingTasks = `-- name: RequeueStaleOrchestratorRoutingTasks :many
+WITH candidates AS (
+    SELECT atq.id, a.runtime_id AS current_runtime_id
+    FROM agent_task_queue atq
+    JOIN agent a ON a.id = atq.agent_id
+    JOIN agent_runtime ar ON ar.id = a.runtime_id
+    JOIN room_orchestration ro ON ro.chat_session_id = atq.chat_session_id
+    WHERE ro.decision_type = 'orchestrator_routing'
+      AND ro.status = 'pending'
+      AND atq.status = 'dispatched'
+      AND atq.started_at IS NULL
+      AND atq.completed_at IS NULL
+      AND atq.dispatched_at < now() - make_interval(secs => $1::double precision)
+      AND ar.status = 'online'
+    ORDER BY atq.dispatched_at ASC
+    LIMIT $2::int
+    FOR UPDATE OF atq SKIP LOCKED
+)
+UPDATE agent_task_queue atq
+SET status = 'queued',
+    runtime_id = candidates.current_runtime_id,
+    dispatched_at = NULL,
+    prepare_lease_expires_at = NULL,
+    wait_reason = NULL,
+    error = NULL,
+    failure_reason = NULL
+FROM candidates
+WHERE atq.id = candidates.id
+RETURNING atq.id, atq.agent_id, atq.issue_id, atq.status, atq.priority, atq.dispatched_at, atq.started_at, atq.completed_at, atq.result, atq.error, atq.created_at, atq.context, atq.runtime_id, atq.session_id, atq.work_dir, atq.trigger_comment_id, atq.chat_session_id, atq.autopilot_run_id, atq.attempt, atq.max_attempts, atq.parent_task_id, atq.failure_reason, atq.trigger_summary, atq.force_fresh_session, atq.is_leader_task, atq.wait_reason, atq.initiator_user_id, atq.handoff_note, atq.prepare_lease_expires_at, atq.squad_id
+`
+
+type RequeueStaleOrchestratorRoutingTasksParams struct {
+	TimeoutSecs float64 `json:"timeout_secs"`
+	MaxPerTick  int32   `json:"max_per_tick"`
+}
+
+// Room orchestrator routing is a short decision step, not long-running work.
+// If the task was handed to a daemon but never acknowledged with StartTask,
+// release the agent slot and retry on the orchestrator agent's current online
+// runtime. This catches the common recovery path where the user moved the
+// room orchestrator to a new runtime after the old runtime went away.
+func (q *Queries) RequeueStaleOrchestratorRoutingTasks(ctx context.Context, arg RequeueStaleOrchestratorRoutingTasksParams) ([]AgentTaskQueue, error) {
+	rows, err := q.db.Query(ctx, requeueStaleOrchestratorRoutingTasks, arg.TimeoutSecs, arg.MaxPerTick)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []AgentTaskQueue{}
+	for rows.Next() {
+		var i AgentTaskQueue
+		if err := rows.Scan(
+			&i.ID,
+			&i.AgentID,
+			&i.IssueID,
+			&i.Status,
+			&i.Priority,
+			&i.DispatchedAt,
+			&i.StartedAt,
+			&i.CompletedAt,
+			&i.Result,
+			&i.Error,
+			&i.CreatedAt,
+			&i.Context,
+			&i.RuntimeID,
+			&i.SessionID,
+			&i.WorkDir,
+			&i.TriggerCommentID,
+			&i.ChatSessionID,
+			&i.AutopilotRunID,
+			&i.Attempt,
+			&i.MaxAttempts,
+			&i.ParentTaskID,
+			&i.FailureReason,
+			&i.TriggerSummary,
+			&i.ForceFreshSession,
+			&i.IsLeaderTask,
+			&i.WaitReason,
+			&i.InitiatorUserID,
+			&i.HandoffNote,
+			&i.PrepareLeaseExpiresAt,
+			&i.SquadID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const restoreAgent = `-- name: RestoreAgent :one
 UPDATE agent SET archived_at = NULL, archived_by = NULL, updated_at = now()
 WHERE id = $1

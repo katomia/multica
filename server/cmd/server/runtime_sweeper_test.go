@@ -343,6 +343,202 @@ func TestSweepDispatchedStaleTask(t *testing.T) {
 	}
 }
 
+func TestRequeueStaleOrchestratorRoutingTasksMovesToCurrentRuntime(t *testing.T) {
+	if testPool == nil {
+		t.Skip("no database connection")
+	}
+
+	ctx := context.Background()
+	queries := db.New(testPool)
+
+	var memberID, userID string
+	if err := testPool.QueryRow(ctx, `
+		SELECT m.id, m.user_id
+		FROM member m
+		WHERE m.workspace_id = $1
+		LIMIT 1
+	`, testWorkspaceID).Scan(&memberID, &userID); err != nil {
+		t.Fatalf("failed to find test member: %v", err)
+	}
+
+	var oldRuntimeID, currentRuntimeID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO agent_runtime (
+			workspace_id, daemon_id, name, runtime_mode, provider, status,
+			device_info, metadata, owner_id, last_seen_at
+		)
+		VALUES (
+			$1, 'sweeper-orchestrator-old-' || gen_random_uuid()::text,
+			'Sweeper old orchestrator runtime', 'local', 'codex', 'offline',
+			'', '{}'::jsonb, $2, now() - interval '1 hour'
+		)
+		RETURNING id
+	`, testWorkspaceID, userID).Scan(&oldRuntimeID); err != nil {
+		t.Fatalf("failed to create old runtime: %v", err)
+	}
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO agent_runtime (
+			workspace_id, daemon_id, name, runtime_mode, provider, status,
+			device_info, metadata, owner_id, last_seen_at
+		)
+		VALUES (
+			$1, 'sweeper-orchestrator-current-' || gen_random_uuid()::text,
+			'Sweeper current orchestrator runtime', 'local', 'codex', 'online',
+			'', '{}'::jsonb, $2, now()
+		)
+		RETURNING id
+	`, testWorkspaceID, userID).Scan(&currentRuntimeID); err != nil {
+		t.Fatalf("failed to create current runtime: %v", err)
+	}
+
+	var agentID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO agent (
+			workspace_id, name, description, runtime_mode, runtime_config,
+			runtime_id, visibility, status, max_concurrent_tasks, owner_id,
+			instructions, custom_env, custom_args, mcp_config
+		)
+		VALUES (
+			$1, 'Sweeper Orchestrator ' || substr(gen_random_uuid()::text, 1, 8),
+			'Orchestrator requeue test agent', 'local', '{}'::jsonb,
+			$2, 'private', 'working', 1, $3, '', '{}'::jsonb, '[]'::jsonb, '{}'::jsonb
+		)
+		RETURNING id
+	`, testWorkspaceID, currentRuntimeID, userID).Scan(&agentID); err != nil {
+		t.Fatalf("failed to create orchestrator agent: %v", err)
+	}
+
+	var roomID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO workspace_room (
+			workspace_id, name, display_name, description, visibility,
+			created_by_id, orchestrator_agent_id
+		)
+		VALUES (
+			$1, 'sweeper-orchestrator-requeue-' || substr(gen_random_uuid()::text, 1, 8),
+			'Sweeper orchestrator requeue', '', 'private', $2, $3
+		)
+		RETURNING id
+	`, testWorkspaceID, memberID, agentID).Scan(&roomID); err != nil {
+		t.Fatalf("failed to create room: %v", err)
+	}
+
+	var messageID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO room_message (room_id, sender_type, sender_id, message_type, content, metadata)
+		VALUES ($1, 'member', $2, 'human', 'route this', '{}'::jsonb)
+		RETURNING id
+	`, roomID, memberID).Scan(&messageID); err != nil {
+		t.Fatalf("failed to create room message: %v", err)
+	}
+
+	var chatSessionID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO chat_session (workspace_id, agent_id, creator_id, title, runtime_id)
+		VALUES ($1, $2, $3, 'orchestrator routing requeue test', $4)
+		RETURNING id
+	`, testWorkspaceID, agentID, userID, oldRuntimeID).Scan(&chatSessionID); err != nil {
+		t.Fatalf("failed to create chat session: %v", err)
+	}
+
+	if _, err := testPool.Exec(ctx, `
+		INSERT INTO room_orchestration (
+			room_id, source_message_id, decision_source, decision_type, status,
+			input_snapshot, decision_json, chat_session_id
+		)
+		VALUES (
+			$1, $2, 'multi_agent_mention', 'orchestrator_routing', 'pending',
+			'{}'::jsonb, '{}'::jsonb, $3
+		)
+	`, roomID, messageID, chatSessionID); err != nil {
+		t.Fatalf("failed to create room orchestration: %v", err)
+	}
+
+	var taskID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO agent_task_queue (
+			agent_id, runtime_id, chat_session_id, status, priority,
+			dispatched_at, prepare_lease_expires_at, wait_reason, error, failure_reason
+		)
+		VALUES (
+			$1, $2, $3, 'dispatched', 0,
+			now() - interval '3 minutes', now() - interval '2 minutes',
+			'waiting', 'old error', 'timeout'
+		)
+		RETURNING id
+	`, agentID, oldRuntimeID, chatSessionID).Scan(&taskID); err != nil {
+		t.Fatalf("failed to create stale orchestrator routing task: %v", err)
+	}
+	t.Cleanup(func() {
+		testPool.Exec(ctx, `DELETE FROM agent_task_queue WHERE agent_id = $1`, agentID)
+		testPool.Exec(ctx, `DELETE FROM room_orchestration WHERE room_id = $1`, roomID)
+		testPool.Exec(ctx, `DELETE FROM chat_session WHERE id = $1`, chatSessionID)
+		testPool.Exec(ctx, `DELETE FROM room_message WHERE room_id = $1`, roomID)
+		testPool.Exec(ctx, `DELETE FROM workspace_room WHERE id = $1`, roomID)
+		testPool.Exec(ctx, `DELETE FROM agent WHERE id = $1`, agentID)
+		testPool.Exec(ctx, `DELETE FROM agent_runtime WHERE id IN ($1, $2)`, oldRuntimeID, currentRuntimeID)
+	})
+
+	requeued, err := queries.RequeueStaleOrchestratorRoutingTasks(ctx, db.RequeueStaleOrchestratorRoutingTasksParams{
+		TimeoutSecs: 120.0,
+		MaxPerTick:  100,
+	})
+	if err != nil {
+		t.Fatalf("RequeueStaleOrchestratorRoutingTasks failed: %v", err)
+	}
+	var found bool
+	for _, task := range requeued {
+		if task.ID.Bytes != parseUUIDBytes(taskID) {
+			continue
+		}
+		found = true
+		if task.Status != "queued" {
+			t.Fatalf("expected returned task status queued, got %q", task.Status)
+		}
+		if task.RuntimeID.Bytes != parseUUIDBytes(currentRuntimeID) {
+			t.Fatalf("expected returned runtime_id to move to current runtime")
+		}
+		break
+	}
+	if !found {
+		t.Fatalf("expected task %s to be requeued, got %d returned tasks", taskID, len(requeued))
+	}
+
+	var status, runtimeID string
+	var dispatchedCleared, prepareLeaseCleared, waitReasonCleared, errorCleared, failureReasonCleared bool
+	if err := testPool.QueryRow(ctx, `
+		SELECT
+			status,
+			runtime_id,
+			dispatched_at IS NULL,
+			prepare_lease_expires_at IS NULL,
+			wait_reason IS NULL,
+			error IS NULL,
+			failure_reason IS NULL
+		FROM agent_task_queue
+		WHERE id = $1
+	`, taskID).Scan(
+		&status,
+		&runtimeID,
+		&dispatchedCleared,
+		&prepareLeaseCleared,
+		&waitReasonCleared,
+		&errorCleared,
+		&failureReasonCleared,
+	); err != nil {
+		t.Fatalf("failed to read requeued task: %v", err)
+	}
+	if status != "queued" {
+		t.Fatalf("expected task status queued, got %q", status)
+	}
+	if runtimeID != currentRuntimeID {
+		t.Fatalf("expected runtime_id %s, got %s", currentRuntimeID, runtimeID)
+	}
+	if !dispatchedCleared || !prepareLeaseCleared || !waitReasonCleared || !errorCleared || !failureReasonCleared {
+		t.Fatalf("expected dispatch/lease/wait/error fields to be cleared")
+	}
+}
+
 // TestSweepResetsInProgressIssueToTodo verifies the core fix: when the sweeper
 // force-fails a stale task whose issue is still in_progress (because the daemon
 // crashed mid-run), the issue is reset back to todo so the daemon can re-queue it.

@@ -513,6 +513,41 @@ WHERE (
    OR (status = 'running' AND started_at < now() - make_interval(secs => @running_timeout_secs::double precision))
 RETURNING *;
 
+-- name: RequeueStaleOrchestratorRoutingTasks :many
+-- Room orchestrator routing is a short decision step, not long-running work.
+-- If the task was handed to a daemon but never acknowledged with StartTask,
+-- release the agent slot and retry on the orchestrator agent's current online
+-- runtime. This catches the common recovery path where the user moved the
+-- room orchestrator to a new runtime after the old runtime went away.
+WITH candidates AS (
+    SELECT atq.id, a.runtime_id AS current_runtime_id
+    FROM agent_task_queue atq
+    JOIN agent a ON a.id = atq.agent_id
+    JOIN agent_runtime ar ON ar.id = a.runtime_id
+    JOIN room_orchestration ro ON ro.chat_session_id = atq.chat_session_id
+    WHERE ro.decision_type = 'orchestrator_routing'
+      AND ro.status = 'pending'
+      AND atq.status = 'dispatched'
+      AND atq.started_at IS NULL
+      AND atq.completed_at IS NULL
+      AND atq.dispatched_at < now() - make_interval(secs => @timeout_secs::double precision)
+      AND ar.status = 'online'
+    ORDER BY atq.dispatched_at ASC
+    LIMIT @max_per_tick::int
+    FOR UPDATE OF atq SKIP LOCKED
+)
+UPDATE agent_task_queue atq
+SET status = 'queued',
+    runtime_id = candidates.current_runtime_id,
+    dispatched_at = NULL,
+    prepare_lease_expires_at = NULL,
+    wait_reason = NULL,
+    error = NULL,
+    failure_reason = NULL
+FROM candidates
+WHERE atq.id = candidates.id
+RETURNING atq.*;
+
 -- name: ExpireStaleQueuedTasks :many
 -- Fails tasks that have been sitting in 'queued' for longer than the TTL.
 -- This is the cleanup arm of the MUL-1899 "queued backlog" fix: even with the

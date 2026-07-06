@@ -344,14 +344,14 @@ func fallbackRoomDisplayStatus(o db.RoomOrchestration) string {
 		return failedRoomDisplayStatus(o)
 	}
 	if o.DecisionType == "orchestrator_routing" {
-		if o.Status == "applied" {
-			return "orchestrator created plan"
-		}
-		return "orchestrator deciding"
+		return "waiting for orchestrator runtime"
 	}
 	if o.Status == "applied" {
 		switch o.DecisionType {
 		case "chat_only":
+			if o.DecisionSource == "single_agent_mention" {
+				return "waiting for runtime"
+			}
 			return "orchestrator routed to chat"
 		case "single_issue":
 			return "orchestrator created issue"
@@ -416,7 +416,15 @@ func (h *Handler) deriveRoomDisplayStatus(ctx context.Context, room db.Workspace
 	if orch.Status == "failed" {
 		return failedRoomDisplayStatus(orch), "failed"
 	}
+	if orch.DecisionSource == "single_agent_mention" && orch.DecisionType == "chat_only" {
+		return h.deriveSingleAgentRoomStatus(ctx, orch)
+	}
 	if orch.DecisionType == "orchestrator_routing" {
+		if orch.ChatSessionID.Valid {
+			if status, tone, ok := h.pendingChatSessionDisplay(ctx, orch.ChatSessionID, "waiting for orchestrator runtime", "orchestrator dealing"); ok {
+				return status, tone
+			}
+		}
 		if room.OrchestratorAgentID.Valid {
 			agent, err := h.Queries.GetAgentInWorkspace(ctx, db.GetAgentInWorkspaceParams{ID: room.OrchestratorAgentID, WorkspaceID: room.WorkspaceID})
 			if err == nil && agent.RuntimeID.Valid {
@@ -428,9 +436,9 @@ func (h *Handler) deriveRoomDisplayStatus(ctx context.Context, room db.Workspace
 			}
 		}
 		if orch.Status == "applied" {
-			return "orchestrator created plan", "applied"
+			return "orchestrator routed", "applied"
 		}
-		return "orchestrator deciding", "pending"
+		return "waiting for orchestrator runtime", "pending"
 	}
 	if orch.Status != "applied" {
 		return fallbackRoomDisplayStatus(orch), fallbackRoomDisplayTone(orch)
@@ -439,7 +447,7 @@ func (h *Handler) deriveRoomDisplayStatus(ctx context.Context, room db.Workspace
 	if orch.DecisionType == "plan" {
 		actions, err := h.Queries.ListRoomOrchestrationActions(ctx, orch.ID)
 		if err == nil {
-			if status, ok := roomPlanDisplayStatus(actions); ok {
+			if status, ok := h.roomPlanDisplayStatus(ctx, actions, runtimeByID); ok {
 				return status, "applied"
 			}
 		}
@@ -517,23 +525,86 @@ func (h *Handler) deriveRoomDisplayStatus(ctx context.Context, room db.Workspace
 	}
 }
 
-func roomPlanDisplayStatus(actions []db.RoomOrchestrationAction) (string, bool) {
+func (h *Handler) deriveSingleAgentRoomStatus(ctx context.Context, orch db.RoomOrchestration) (string, string) {
+	if orch.ChatSessionID.Valid {
+		if status, tone, ok := h.pendingChatSessionDisplay(ctx, orch.ChatSessionID, "waiting for runtime", "agent dealing"); ok {
+			return status, tone
+		}
+	}
+	return "agent done", "applied"
+}
+
+func (h *Handler) pendingChatSessionDisplay(ctx context.Context, chatSessionID pgtype.UUID, queuedLabel, activeLabel string) (string, string, bool) {
+	pending, err := h.Queries.GetPendingChatTask(ctx, chatSessionID)
+	if err != nil {
+		return "", "", false
+	}
+	switch pending.Status {
+	case "queued":
+		return queuedLabel, "pending", true
+	case "dispatched", "running", "waiting_local_directory":
+		return activeLabel, "applied", true
+	default:
+		return "", "", false
+	}
+}
+
+func (h *Handler) roomPlanDisplayStatus(ctx context.Context, actions []db.RoomOrchestrationAction, runtimeByID map[string]db.AgentRuntime) (string, bool) {
 	if len(actions) == 0 {
 		return "", false
 	}
 	counts := map[string]int{}
+	parts := make([]string, 0, len(actions))
 	for _, action := range actions {
 		counts[action.Status]++
+		label := "agent"
+		if action.AgentID.Valid {
+			if agent, err := h.Queries.GetAgent(ctx, action.AgentID); err == nil {
+				name := strings.TrimSpace(agent.Name)
+				if name != "" {
+					label = name
+				}
+				if action.Status == "pending" && agent.RuntimeID.Valid {
+					if rt, ok := runtimeByID[uuidToString(agent.RuntimeID)]; ok && rt.Status != "online" {
+						parts = append(parts, label+" offline")
+						continue
+					}
+				}
+			}
+		}
+		switch action.Status {
+		case "done":
+			parts = append(parts, label+" done")
+		case "failed":
+			parts = append(parts, label+" failed")
+		case "running":
+			parts = append(parts, label+" working")
+		case "blocked":
+			parts = append(parts, label+" waiting")
+		case "pending":
+			if action.ChatSessionID.Valid {
+				if status, _, ok := h.pendingChatSessionDisplay(ctx, action.ChatSessionID, label+" queued", label+" working"); ok {
+					parts = append(parts, status)
+					continue
+				}
+			}
+			parts = append(parts, label+" queued")
+		}
+	}
+	if len(parts) > 0 {
+		return strings.Join(parts, " | "), true
 	}
 	switch {
 	case counts["failed"] > 0:
 		return "room plan has failed actions", true
 	case counts["running"] > 0:
 		return fmt.Sprintf("room plan running (%d active)", counts["running"]), true
+	case counts["pending"] > 0:
+		return "waiting for agents", true
 	case counts["blocked"] > 0:
 		return fmt.Sprintf("room plan waiting (%d blocked)", counts["blocked"]), true
 	case counts["done"] == len(actions):
-		return "room plan completed", true
+		return "agents done", true
 	default:
 		return "orchestrator created plan", true
 	}
@@ -1122,20 +1193,23 @@ func (h *Handler) applyRoomSingleAgentMention(r *http.Request, room db.Workspace
 
 func (h *Handler) applyRoomMultiAgentMention(r *http.Request, room db.WorkspaceRoom, msg db.RoomMessage, content string, mentionedAgents []db.Agent, forceIssueIntent bool, resp SendRoomMessageResponse) (SendRoomMessageResponse, error) {
 	if !room.OrchestratorAgentID.Valid {
-		return h.applyRoomMultiAgentChatFallback(r, room, msg, content, mentionedAgents, resp)
+		return h.applyRoomMissingOrchestrator(r, room, msg, resp)
 	}
 	orchestratorAgent, err := h.Queries.GetAgentInWorkspace(r.Context(), db.GetAgentInWorkspaceParams{
 		ID:          room.OrchestratorAgentID,
 		WorkspaceID: room.WorkspaceID,
 	})
 	if err != nil || orchestratorAgent.ArchivedAt.Valid {
-		return h.applyRoomMultiAgentChatFallback(r, room, msg, content, mentionedAgents, resp)
+		return h.applyRoomMissingOrchestrator(r, room, msg, resp)
 	}
-	if !h.roomOrchestratorReady(orchestratorAgent) {
-		return h.applyRoomMultiAgentChatFallback(r, room, msg, content, mentionedAgents, resp)
+	if !orchestratorAgent.RuntimeID.Valid {
+		return h.applyRoomMissingOrchestrator(r, room, msg, resp)
 	}
 	orch, err := h.routeToRoomOrchestrator(r, room, msg, content, mentionedAgents, orchestratorAgent, forceIssueIntent)
 	if err != nil {
+		if errors.Is(err, service.ErrChatTaskAgentNoRuntime) {
+			return h.applyRoomMissingOrchestrator(r, room, msg, resp)
+		}
 		return resp, err
 	}
 	resp.Orchestration = ptrRoomOrchestrationWithRoom(h, r.Context(), room, orch)
@@ -1479,11 +1553,6 @@ Use the exact agent names as they appear in the @mentions.`
 
 func pickRoomOrchestratorRuntime(runtimes []db.AgentRuntime) (db.AgentRuntime, bool) {
 	for _, runtime := range runtimes {
-		if runtime.Status == "online" && runtime.Provider == "codex" {
-			return runtime, true
-		}
-	}
-	for _, runtime := range runtimes {
 		if runtime.Status == "online" {
 			return runtime, true
 		}
@@ -1508,7 +1577,7 @@ func (h *Handler) maybeCreateRoomOrchestrator(ctx context.Context, room db.Works
 		return room
 	}
 
-	agentName := "#" + room.Name + " Orchestrator"
+	agentName := room.Name + " Orchestrator"
 	instructions := fmt.Sprintf(roomOrchestratorInstructions, room.Name)
 	agent, err := h.Queries.CreateAgent(ctx, db.CreateAgentParams{
 		WorkspaceID:        room.WorkspaceID,
@@ -1629,13 +1698,13 @@ type roomPlanDecision struct {
 }
 
 type roomPlanAction struct {
-	Key        string   `json:"key"`
-	Mode       string   `json:"mode"`
-	Agent      string   `json:"agent"`
-	Title      string   `json:"title"`
-	Stage      int32    `json:"stage"`
-	Deliverable string  `json:"deliverable"`
-	DependsOn  []string `json:"depends_on"`
+	Key         string   `json:"key"`
+	Mode        string   `json:"mode"`
+	Agent       string   `json:"agent"`
+	Title       string   `json:"title"`
+	Stage       int32    `json:"stage"`
+	Deliverable string   `json:"deliverable"`
+	DependsOn   []string `json:"depends_on"`
 }
 
 // ApplyOrchestratorDecision parses the orchestrator decision, normalizes both
@@ -1734,7 +1803,7 @@ func (h *Handler) ApplyOrchestratorDecision(ctx context.Context, orch db.RoomOrc
 				AgentID:         agentUUID,
 				Title:           action.Title,
 				Stage:           action.Stage,
-				Status:          "running",
+				Status:          "pending",
 				Deliverable:     action.Deliverable,
 				DependsOn:       depsJSON,
 				ChatSessionID:   session.ID,

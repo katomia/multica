@@ -2,7 +2,21 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertCircle, Bot, CheckCircle2, FolderGit, FolderOpen, Hash, Loader2, MessageSquarePlus, Plus, Send, Users } from "lucide-react";
+import {
+  AlertCircle,
+  Bot,
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  FolderGit,
+  FolderOpen,
+  Hash,
+  Loader2,
+  MessageSquarePlus,
+  Plus,
+  Send,
+  Users,
+} from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@multica/ui/components/ui/button";
 import { Input } from "@multica/ui/components/ui/input";
@@ -32,6 +46,8 @@ const EMPTY_RESOURCES: ProjectResource[] = [];
 const EMPTY_GRANTS: RoomResourceGrant[] = [];
 const EMPTY_PROJECTS: Project[] = [];
 
+type RightPanelSectionId = "agents" | "issues" | "resources";
+
 function formatTime(value: string) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "";
@@ -49,16 +65,36 @@ function slugifyRoomName(title: string) {
   return title.trim().toLowerCase().replace(/[\s_]+/g, "-").replace(/[^a-z0-9-]/g, "").replace(/-+/g, "-").replace(/^-|-$/g, "") || `project-${Date.now()}`;
 }
 
+function githubRepoName(url: string | undefined) {
+  if (!url) return "";
+  const trimmed = url.trim().replace(/\.git$/, "");
+  const sshMatch = trimmed.match(/[:/]([^/:]+\/[^/]+)$/);
+  if (sshMatch?.[1]) return sshMatch[1];
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.pathname.replace(/^\/|\/$/g, "") || trimmed;
+  } catch {
+    return trimmed;
+  }
+}
+
 function resourceDisplay(resource: ProjectResource) {
   if (resource.resource_type === "github_repo") {
     const ref = resource.resource_ref as { url?: string; ref?: string };
-    return resource.label || (ref.ref ? `${ref.url} @ ${ref.ref}` : ref.url) || resource.resource_type;
+    const repoName = githubRepoName(ref.url);
+    return resource.label || (ref.ref && repoName ? `${repoName} @ ${ref.ref}` : repoName) || ref.url || resource.resource_type;
   }
   if (resource.resource_type === "local_directory") {
     const ref = resource.resource_ref as { local_path?: string; label?: string };
     return resource.label || ref.label || ref.local_path || resource.resource_type;
   }
   return resource.label || resource.resource_type;
+}
+
+function grantResourceDisplay(grant: RoomResourceGrant, resource: ProjectResource | undefined) {
+  if (resource) return resourceDisplay(resource);
+  if (grant.resource_label && grant.resource_label !== grant.resource_type) return grant.resource_label;
+  return grant.resource_id;
 }
 
 function orchestrationSummary(orch: RoomOrchestration, issueCount: number) {
@@ -108,6 +144,14 @@ export function RoomsPage() {
   const [mentionAnchor, setMentionAnchor] = useState<{ query: string; start: number } | null>(null);
   const [selectedMentionIndex, setSelectedMentionIndex] = useState(0);
   const [createFromProjectOpen, setCreateFromProjectOpen] = useState(false);
+  const [expandedRightPanelSections, setExpandedRightPanelSections] = useState<Record<RightPanelSectionId, boolean>>({
+    agents: true,
+    issues: true,
+    resources: true,
+  });
+  const [expandedResourceGrantIds, setExpandedResourceGrantIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const qc = useQueryClient();
@@ -163,9 +207,10 @@ export function RoomsPage() {
   const projectResources = projectResourcesQuery.data ?? EMPTY_RESOURCES;
   const projectsWithoutRoom = projectsWithoutRoomQuery.data ?? EMPTY_PROJECTS;
   const resourceGrants = resourceGrantsQuery.data ?? EMPTY_GRANTS;
+  const agentMembers = members.filter((m) => m.member_type === "agent");
   const joinedAgentIds = useMemo(
-    () => new Set(members.filter((m) => m.member_type === "agent").map((m) => m.member_id)),
-    [members],
+    () => new Set(agentMembers.map((m) => m.member_id)),
+    [agentMembers],
   );
   const roomOrchestratorAgentIds = useMemo(
     () => new Set(rooms.map((room) => room.orchestrator_agent_id).filter((id): id is string => Boolean(id))),
@@ -199,6 +244,60 @@ export function RoomsPage() {
   const joinableAgents = agents.filter(
     (agent) => !agent.archived_at && !joinedAgentIds.has(agent.id) && !roomOrchestratorAgentIds.has(agent.id),
   );
+  const projectResourceById = useMemo(
+    () => new Map(projectResources.map((resource) => [resource.id, resource])),
+    [projectResources],
+  );
+  const resourceGrantGroups = useMemo(() => {
+    const groups = new Map<
+      string,
+      {
+        id: string;
+        label: string;
+        type: string;
+        grants: RoomResourceGrant[];
+        readCount: number;
+        writeCount: number;
+      }
+    >();
+
+    for (const grant of resourceGrants) {
+      const existing = groups.get(grant.resource_id);
+      if (existing) {
+        existing.grants.push(grant);
+        if (grant.access_level === "write") existing.writeCount += 1;
+        else existing.readCount += 1;
+        continue;
+      }
+
+      groups.set(grant.resource_id, {
+        id: grant.resource_id,
+        label: grantResourceDisplay(grant, projectResourceById.get(grant.resource_id)),
+        type: grant.resource_type,
+        grants: [grant],
+        readCount: grant.access_level === "read" ? 1 : 0,
+        writeCount: grant.access_level === "write" ? 1 : 0,
+      });
+    }
+
+    return Array.from(groups.values()).sort((a, b) => a.label.localeCompare(b.label));
+  }, [projectResourceById, resourceGrants]);
+
+  const handleToggleResourceGrantGroup = (resourceId: string) => {
+    setExpandedResourceGrantIds((current) => {
+      const next = new Set(current);
+      if (next.has(resourceId)) next.delete(resourceId);
+      else next.add(resourceId);
+      return next;
+    });
+  };
+
+  const handleToggleRightPanelSection = (section: RightPanelSectionId) => {
+    setExpandedRightPanelSections((current) => ({
+      ...current,
+      [section]: !current[section],
+    }));
+  };
 
   const handleCreateRoom = () => {
     const name = newRoomName.trim();
@@ -261,6 +360,19 @@ export function RoomsPage() {
     [qc, wsId, roomId],
   );
   useWSEvent("room:message_created", handleRoomMessageCreated);
+
+  const handleRoomTaskEvent = useCallback(() => {
+    if (!roomId) return;
+    qc.invalidateQueries({ queryKey: roomKeys.orchestrations(wsId, roomId) });
+    qc.invalidateQueries({ queryKey: roomKeys.issues(wsId, roomId) });
+  }, [qc, roomId, wsId]);
+  useWSEvent("task:queued", handleRoomTaskEvent);
+  useWSEvent("task:dispatch", handleRoomTaskEvent);
+  useWSEvent("task:running", handleRoomTaskEvent);
+  useWSEvent("task:completed", handleRoomTaskEvent);
+  useWSEvent("task:failed", handleRoomTaskEvent);
+  useWSEvent("task:cancelled", handleRoomTaskEvent);
+  useWSEvent("issue:updated", handleRoomTaskEvent);
 
   const roomAgentMembers = useMemo(
     () =>
@@ -631,116 +743,215 @@ export function RoomsPage() {
 
       <aside className="flex w-96 shrink-0 flex-col border-l bg-muted/10">
         <div className="border-b p-4">
-          <div className="flex items-center gap-2 text-sm font-medium">
-            <Bot className="size-4" />
-            Room agents
-          </div>
-          <div className="mt-3 flex gap-2">
-            <select
-              value={selectedAgentId}
-              onChange={(event) => setSelectedAgentId(event.target.value)}
-              disabled={!activeRoom || joinableAgents.length === 0}
-              className="h-9 min-w-0 flex-1 rounded-md border bg-background px-3 text-sm"
-            >
-              <option value="">Add agent...</option>
-              {joinableAgents.map((agent) => (
-                <option key={agent.id} value={agent.id}>
-                  {agent.name}
-                </option>
-              ))}
-            </select>
-            <Button onClick={handleAddAgent} disabled={!selectedAgentId || addMember.isPending}>
-              {addMember.isPending ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
-              Add
-            </Button>
-          </div>
-          <div className="mt-3 flex flex-wrap gap-1.5">
-            {members.filter((m) => m.member_type === "agent").map((member) => (
-              <Badge key={`${member.member_type}:${member.member_id}`} variant="secondary">
-                @{member.name}
-              </Badge>
-            ))}
-            {members.filter((m) => m.member_type === "agent").length === 0 && (
-              <span className="text-xs text-muted-foreground">Add an agent before using @agent.</span>
+          <button
+            type="button"
+            onClick={() => handleToggleRightPanelSection("agents")}
+            className="flex w-full items-center gap-2 text-left text-sm font-medium"
+            aria-expanded={expandedRightPanelSections.agents}
+          >
+            {expandedRightPanelSections.agents ? (
+              <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
+            ) : (
+              <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
             )}
-          </div>
+            <Bot className="size-4" />
+            <span className="min-w-0 flex-1">Room agents</span>
+            <Badge variant="secondary" className="px-1.5 py-0 text-[10px]">
+              {agentMembers.length}
+            </Badge>
+          </button>
+          {expandedRightPanelSections.agents && (
+            <>
+              <div className="mt-3 flex gap-2">
+                <select
+                  value={selectedAgentId}
+                  onChange={(event) => setSelectedAgentId(event.target.value)}
+                  disabled={!activeRoom || joinableAgents.length === 0}
+                  className="h-9 min-w-0 flex-1 rounded-md border bg-background px-3 text-sm"
+                >
+                  <option value="">Add agent...</option>
+                  {joinableAgents.map((agent) => (
+                    <option key={agent.id} value={agent.id}>
+                      {agent.name}
+                    </option>
+                  ))}
+                </select>
+                <Button onClick={handleAddAgent} disabled={!selectedAgentId || addMember.isPending}>
+                  {addMember.isPending ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
+                  Add
+                </Button>
+              </div>
+              <div className="mt-3 flex flex-wrap gap-1.5">
+                {agentMembers.map((member) => (
+                  <Badge key={`${member.member_type}:${member.member_id}`} variant="secondary">
+                    @{member.name}
+                  </Badge>
+                ))}
+                {agentMembers.length === 0 && (
+                  <span className="text-xs text-muted-foreground">Add an agent before using @agent.</span>
+                )}
+              </div>
+            </>
+          )}
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto p-4">
-          <div className="flex items-center gap-2 text-sm font-medium">
-            <MessageSquarePlus className="size-4" />
-            Room issues
-          </div>
-          <div className="mt-3 space-y-2">
-            {roomIssueEntries.length === 0 && (
-              <div className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">
-                Issues created from this room will appear here.
+          <div>
+            <button
+              type="button"
+              onClick={() => handleToggleRightPanelSection("issues")}
+              className="flex w-full items-center gap-2 text-left text-sm font-medium"
+              aria-expanded={expandedRightPanelSections.issues}
+            >
+              {expandedRightPanelSections.issues ? (
+                <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
+              ) : (
+                <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
+              )}
+              <MessageSquarePlus className="size-4" />
+              <span className="min-w-0 flex-1">Room issues</span>
+              <Badge variant="secondary" className="px-1.5 py-0 text-[10px]">
+                {roomIssueEntries.length}
+              </Badge>
+            </button>
+            {expandedRightPanelSections.issues && (
+              <div className="mt-3 space-y-2">
+                {roomIssueEntries.length === 0 && (
+                  <div className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">
+                    Issues created from this room will appear here.
+                  </div>
+                )}
+                {roomIssueEntries.map((entry) => (
+                  <AppLink
+                    key={`${entry.link.room_message_id}:${entry.link.issue_id}`}
+                    href={paths.issueDetail(entry.link.issue_id)}
+                    className="block rounded-md border bg-background p-3 text-sm hover:bg-accent"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-medium">{entry.issue?.identifier ?? "Issue"}</span>
+                      <div className="flex items-center gap-1">
+                        {entry.issue && <Badge variant="outline">{entry.issue.status}</Badge>}
+                        <Badge variant="secondary" className="text-xs">{entry.link.link_role}</Badge>
+                      </div>
+                    </div>
+                    <div className="mt-1 line-clamp-2 text-muted-foreground">
+                      {entry.issue?.title ?? entry.link.issue_id}
+                    </div>
+                  </AppLink>
+                ))}
               </div>
             )}
-            {roomIssueEntries.map((entry) => (
-              <AppLink
-                key={`${entry.link.room_message_id}:${entry.link.issue_id}`}
-                href={paths.issueDetail(entry.link.issue_id)}
-                className="block rounded-md border bg-background p-3 text-sm hover:bg-accent"
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <span className="font-medium">{entry.issue?.identifier ?? "Issue"}</span>
-                  <div className="flex items-center gap-1">
-                    {entry.issue && <Badge variant="outline">{entry.issue.status}</Badge>}
-                    <Badge variant="secondary" className="text-xs">{entry.link.link_role}</Badge>
-                  </div>
-                </div>
-                <div className="mt-1 line-clamp-2 text-muted-foreground">
-                  {entry.issue?.title ?? entry.link.issue_id}
-                </div>
-              </AppLink>
-            ))}
           </div>
 
           {activeProjectId && (
             <div className="mt-6">
-              <div className="flex items-center gap-2 text-sm font-medium">
+              <button
+                type="button"
+                onClick={() => handleToggleRightPanelSection("resources")}
+                className="flex w-full items-center gap-2 text-left text-sm font-medium"
+                aria-expanded={expandedRightPanelSections.resources}
+              >
+                {expandedRightPanelSections.resources ? (
+                  <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
+                ) : (
+                  <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
+                )}
                 <FolderGit className="size-4" />
-                Resource access
-              </div>
-              <div className="mt-1 text-xs text-muted-foreground">
-                Each agent's access to the project's resources. Default is write; click to downgrade to read.
-              </div>
-              <div className="mt-3 space-y-1.5">
-                {resourceGrantsQuery.isPending && (
-                  <div className="text-xs text-muted-foreground">Loading grants...</div>
-                )}
-                {!resourceGrantsQuery.isPending && resourceGrants.length === 0 && (
-                  <div className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">
-                    Add an agent to seed default write grants for the project's resources.
+                <span className="min-w-0 flex-1">Resource access</span>
+                <Badge variant="secondary" className="px-1.5 py-0 text-[10px]">
+                  {resourceGrantGroups.length}
+                </Badge>
+              </button>
+              {expandedRightPanelSections.resources && (
+                <>
+                  <div className="mt-1 pl-5 text-xs text-muted-foreground">
+                    Each agent's access to the project's resources. Default is write; click to downgrade to read.
                   </div>
-                )}
-                {resourceGrants.map((grant) => (
-                  <div
-                    key={grant.id}
-                    className="flex items-center gap-2 rounded-md border bg-background px-2 py-1.5 text-xs"
-                  >
-                    <Badge variant="secondary" className="shrink-0">@{grant.agent_name}</Badge>
-                    <span className="min-w-0 flex-1 truncate" title={grant.resource_label || grant.resource_type}>
-                      {grant.resource_label || grant.resource_type}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => handleToggleGrant(grant)}
-                      disabled={updateGrant.isPending}
-                      title="Toggle access level"
-                      className={cn(
-                        "shrink-0 rounded-sm px-1.5 py-0.5 text-[10px] font-medium transition-colors",
-                        grant.access_level === "write"
-                          ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-500/20"
-                          : "bg-muted text-muted-foreground hover:bg-accent",
-                      )}
-                    >
-                      {grant.access_level === "write" ? "write" : "read"}
-                    </button>
+                  <div className="mt-3 space-y-1.5">
+                    {resourceGrantsQuery.isPending && (
+                      <div className="text-xs text-muted-foreground">Loading grants...</div>
+                    )}
+                    {!resourceGrantsQuery.isPending && resourceGrants.length === 0 && (
+                      <div className="rounded-md border border-dashed p-3 text-xs text-muted-foreground">
+                        Add an agent to seed default write grants for the project's resources.
+                      </div>
+                    )}
+                    {resourceGrantGroups.map((group) => {
+                      const expanded = expandedResourceGrantIds.has(group.id);
+                      return (
+                        <div
+                          key={group.id}
+                          className="overflow-hidden rounded-md border bg-background text-xs"
+                        >
+                          <button
+                            type="button"
+                            onClick={() => handleToggleResourceGrantGroup(group.id)}
+                            className="flex w-full items-center gap-2 px-2 py-1.5 text-left hover:bg-accent"
+                            aria-expanded={expanded}
+                          >
+                            {expanded ? (
+                              <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" />
+                            ) : (
+                              <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
+                            )}
+                            <div className="min-w-0 flex-1">
+                              <div className="truncate font-medium" title={group.label}>
+                                {group.label}
+                              </div>
+                              <div className="truncate text-[10px] text-muted-foreground">
+                                {group.type}
+                              </div>
+                            </div>
+                            <div className="flex shrink-0 items-center gap-1">
+                              {group.readCount > 0 && (
+                                <Badge variant="secondary" className="px-1.5 py-0 text-[10px]">
+                                  {group.readCount} read
+                                </Badge>
+                              )}
+                              {group.writeCount > 0 && (
+                                <Badge className="bg-emerald-500/10 px-1.5 py-0 text-[10px] text-emerald-700 hover:bg-emerald-500/10 dark:text-emerald-300">
+                                  {group.writeCount} write
+                                </Badge>
+                              )}
+                            </div>
+                          </button>
+                          {expanded && (
+                            <div className="space-y-1 border-t bg-muted/20 p-1.5">
+                              {group.grants
+                                .slice()
+                                .sort((a, b) => a.agent_name.localeCompare(b.agent_name))
+                                .map((grant) => (
+                                  <div
+                                    key={grant.id}
+                                    className="flex items-center gap-2 rounded-sm px-1.5 py-1"
+                                  >
+                                    <Badge variant="secondary" className="min-w-0 shrink truncate">
+                                      @{grant.agent_name}
+                                    </Badge>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleToggleGrant(grant)}
+                                      disabled={updateGrant.isPending}
+                                      title="Toggle access level"
+                                      className={cn(
+                                        "ml-auto shrink-0 rounded-sm px-1.5 py-0.5 text-[10px] font-medium transition-colors",
+                                        grant.access_level === "write"
+                                          ? "bg-emerald-500/10 text-emerald-700 hover:bg-emerald-500/20 dark:text-emerald-300"
+                                          : "bg-background text-muted-foreground hover:bg-accent",
+                                      )}
+                                    >
+                                      {grant.access_level === "write" ? "write" : "read"}
+                                    </button>
+                                  </div>
+                                ))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
-                ))}
-              </div>
+                </>
+              )}
             </div>
           )}
         </div>
